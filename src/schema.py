@@ -38,6 +38,71 @@ async def dynamic_provision_table(table_name: str, columns_spec: list):
     raw_query = f"CREATE TABLE IF NOT EXISTS {safe_table} ({', '.join(column_definitions)});"
     await db.execute(query=raw_query)
 
+async def list_tables() -> list[str]:
+    scheme = db.url.scheme
+    if scheme.startswith("sqlite"):
+        rows = await db.fetch_all(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%%' ORDER BY name;"
+        )
+        return [row["name"] for row in rows]
+    rows = await db.fetch_all(
+        "SELECT tablename AS name FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY tablename;"
+    )
+    return [row["name"] for row in rows]
+
+async def describe_table(table_name: str) -> list[dict]:
+    safe_table = validate_identifier(table_name)
+    scheme = db.url.scheme
+    if scheme.startswith("sqlite"):
+        rows = await db.fetch_all(f"PRAGMA table_info({safe_table});")
+        return [
+            {
+                "name": row["name"],
+                "type": row["type"],
+                "nullable": not row["notnull"],
+                "primary_key": bool(row["pk"]),
+                "default": row["dflt_value"],
+            }
+            for row in rows
+        ]
+    rows = await db.fetch_all(
+        query=(
+            "SELECT column_name AS name, data_type AS type, is_nullable, column_default AS default_value "
+            "FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = :table_name "
+            "ORDER BY ordinal_position;"
+        ),
+        values={"table_name": safe_table},
+    )
+    return [
+        {
+            "name": row["name"],
+            "type": row["type"],
+            "nullable": row["is_nullable"] == "YES",
+            "primary_key": False,
+            "default": row["default_value"],
+        }
+        for row in rows
+    ]
+
+async def drop_table(table_name: str):
+    safe_table = validate_identifier(table_name)
+    await db.execute(f"DROP TABLE IF EXISTS {safe_table};")
+
+async def add_column(table_name: str, column: dict):
+    safe_table = validate_identifier(table_name)
+    col_name = validate_identifier(column["name"])
+    col_type = translate_column_type(column["type"], db.url.scheme)
+    null_stmt = "NOT NULL" if not column.get("nullable", True) else ""
+    query = f"ALTER TABLE {safe_table} ADD COLUMN {col_name} {col_type} {null_stmt};".strip()
+    await db.execute(query)
+
+async def count_rows(table_name: str, where_clause: str = "", params: dict | None = None) -> int:
+    safe_table = validate_identifier(table_name)
+    query = f"SELECT COUNT(*) AS count FROM {safe_table} {where_clause};"
+    row = await db.fetch_one(query=query, values=params or {})
+    return row["count"]
+
 def build_where_clause(args):
     """
     Parses dynamic sequences of query arguments safely into parameterized SQL filters.

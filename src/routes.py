@@ -1,5 +1,14 @@
 from fastapi import APIRouter, HTTPException, Request
-from src.schema import dynamic_provision_table, validate_identifier, build_where_clause
+from src.schema import (
+    dynamic_provision_table,
+    validate_identifier,
+    build_where_clause,
+    list_tables,
+    describe_table,
+    drop_table,
+    add_column,
+    count_rows,
+)
 from src.database import db
 
 router = APIRouter(prefix="/api")
@@ -8,6 +17,62 @@ router = APIRouter(prefix="/api")
 @router.get("/health")
 async def health_check():
     return {"status": "online", "engine": "Omnibase", "db_dialect": db.url.scheme}
+
+
+# --- TABLE MANAGEMENT ---
+@router.get("/tables")
+async def get_tables():
+    try:
+        tables = await list_tables()
+        return {"tables": tables}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/tables/{table_name}/schema")
+async def get_table_schema(table_name: str):
+    try:
+        columns = await describe_table(table_name)
+        if not columns:
+            raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found.")
+        return {"table": table_name, "columns": columns}
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/tables/{table_name}")
+async def delete_table(table_name: str):
+    try:
+        existing = await describe_table(table_name)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found.")
+        await drop_table(table_name)
+        return {"status": "success", "message": f"Table '{table_name}' dropped."}
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/tables/{table_name}/columns", status_code=201)
+async def add_table_column(table_name: str, payload: dict):
+    name = payload.get("name")
+    col_type = payload.get("type")
+    if not name or not col_type:
+        raise HTTPException(status_code=400, detail="Column 'name' and 'type' are required.")
+    try:
+        await add_column(table_name, payload)
+        return {"status": "success", "message": f"Column '{name}' added to '{table_name}'."}
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # --- 1. SCHEMA GENERATOR (Table Provisioning) ---
@@ -42,6 +107,19 @@ async def db_insert(table_name: str, payload: dict):
         
         await db.execute(query=query, values=payload)
         return {"status": "success"}
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/db/count/{table_name}")
+async def db_count(table_name: str, request: Request):
+    try:
+        query_params = request.query_params.multi_items()
+        where_clause, params = build_where_clause(query_params)
+        total = await count_rows(table_name, where_clause, params)
+        return {"table": table_name, "count": total}
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
