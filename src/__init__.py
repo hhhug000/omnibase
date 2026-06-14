@@ -9,6 +9,8 @@ load_dotenv()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.connect()
+    from src.auth import init_auth_tables
+    await init_auth_tables()
     print(f"Omnibase connected to {db.url.scheme}")
     yield
     await db.disconnect()
@@ -18,6 +20,8 @@ def create_app():
     app = FastAPI(title="Omnibase", lifespan=lifespan)
 
     from src.routes import router
+    from src.auth import router as auth_router
     app.include_router(router)
+    app.include_router(auth_router)
 
     return app

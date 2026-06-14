@@ -1,0 +1,7 @@
+import os
+
+CODE_TTL_SECONDS = int(os.getenv("AUTH_CODE_TTL_SECONDS", "300"))
+TOKEN_TTL_SECONDS = int(os.getenv("AUTH_TOKEN_TTL_SECONDS", "86400"))
+
+CODE_LENGTH = 32
+TOKEN_LENGTH = 48
