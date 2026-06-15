@@ -1,5 +1,6 @@
 import re
 import secrets
+import uuid
 from argon2 import PasswordHasher
 
 _USERNAME_RE = re.compile(r"^[a-zA-Z0-9_]{3,32}$")
@@ -10,7 +11,6 @@ _pwhasher = PasswordHasher(
     parallelism=4,
     hash_len=32,
     salt_len=16,
-    type="argon2id",
 )
 
 
@@ -54,3 +54,7 @@ def generate_token() -> str:
     from src.auth.config import TOKEN_LENGTH
 
     return secrets.token_urlsafe(TOKEN_LENGTH)
+
+
+def generate_user_id() -> str:
+    return str(uuid.uuid4())
