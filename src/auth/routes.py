@@ -55,7 +55,14 @@ async def exchange(payload: dict):
 
 @router.get("/me")
 async def me(user: dict = Depends(require_user)):
-    return {"user": user}
+    return {
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "email": user["email"],
+            "created_at": user["created_at"],
+        }
+    }
 
 
 @router.post("/logout")
