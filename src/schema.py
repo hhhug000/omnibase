@@ -1,6 +1,9 @@
 import re
 from src.database import db
 
+OWNER_COLUMN = "_owner"
+HIDDEN_COLUMNS = frozenset({OWNER_COLUMN})
+
 def validate_identifier(name: str) -> str:
     """
     Blocks SQL injection by white-listing safe alphanumeric characters.
@@ -8,7 +11,15 @@ def validate_identifier(name: str) -> str:
     """
     if not isinstance(name, str) or not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name):
         raise ValueError(f"Illegal or unsafe database identifier caught: '{name}'")
+    if name in HIDDEN_COLUMNS:
+        raise ValueError(f"Reserved column name: '{name}'")
     return name
+
+def validate_data_column(name: str) -> str:
+    """Like validate_identifier but allows internal system columns on write."""
+    if name in HIDDEN_COLUMNS:
+        return name
+    return validate_identifier(name)
 
 def translate_column_type(generic_type: str, scheme: str) -> str:
     """Maps dynamic UI types down to structural engine dialects."""
@@ -28,6 +39,7 @@ async def dynamic_provision_table(table_name: str, columns_spec: list):
     scheme = db.url.scheme
     
     column_definitions = [f"id {translate_column_type('id', scheme)}"]
+    column_definitions.append(f"{OWNER_COLUMN} TEXT")
     
     for column in columns_spec:
         col_name = validate_identifier(column["name"])
@@ -50,12 +62,12 @@ async def list_tables() -> list[str]:
     )
     return [row["name"] for row in rows]
 
-async def describe_table(table_name: str) -> list[dict]:
+async def describe_table(table_name: str, *, include_hidden: bool = False) -> list[dict]:
     safe_table = validate_identifier(table_name)
     scheme = db.url.scheme
     if scheme.startswith("sqlite"):
         rows = await db.fetch_all(f"PRAGMA table_info({safe_table});")
-        return [
+        columns = [
             {
                 "name": row["name"],
                 "type": row["type"],
@@ -65,25 +77,36 @@ async def describe_table(table_name: str) -> list[dict]:
             }
             for row in rows
         ]
-    rows = await db.fetch_all(
-        query=(
-            "SELECT column_name AS name, data_type AS type, is_nullable, column_default AS default_value "
-            "FROM information_schema.columns "
-            "WHERE table_schema = 'public' AND table_name = :table_name "
-            "ORDER BY ordinal_position;"
-        ),
-        values={"table_name": safe_table},
-    )
-    return [
-        {
-            "name": row["name"],
-            "type": row["type"],
-            "nullable": row["is_nullable"] == "YES",
-            "primary_key": False,
-            "default": row["default_value"],
-        }
-        for row in rows
-    ]
+    else:
+        rows = await db.fetch_all(
+            query=(
+                "SELECT column_name AS name, data_type AS type, is_nullable, column_default AS default_value "
+                "FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = :table_name "
+                "ORDER BY ordinal_position;"
+            ),
+            values={"table_name": safe_table},
+        )
+        columns = [
+            {
+                "name": row["name"],
+                "type": row["type"],
+                "nullable": row["is_nullable"] == "YES",
+                "primary_key": False,
+                "default": row["default_value"],
+            }
+            for row in rows
+        ]
+    if include_hidden:
+        return columns
+    return [col for col in columns if col["name"] not in HIDDEN_COLUMNS]
+
+async def table_has_owner_column(table_name: str) -> bool:
+    columns = await describe_table(table_name, include_hidden=True)
+    return any(col["name"] == OWNER_COLUMN for col in columns)
+
+def strip_hidden_fields(row: dict) -> dict:
+    return {key: value for key, value in row.items() if key not in HIDDEN_COLUMNS}
 
 async def drop_table(table_name: str):
     safe_table = validate_identifier(table_name)

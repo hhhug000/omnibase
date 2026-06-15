@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from src.auth.config import CODE_TTL_SECONDS, TOKEN_TTL_SECONDS
-from src.auth.crypto import generate_code, generate_token, hash_password
+from src.auth.crypto import generate_code, generate_token, generate_user_id, hash_password
 from src.database import db
 
 
@@ -23,21 +23,20 @@ def _is_sqlite() -> bool:
 
 async def init_auth_tables():
     if _is_sqlite():
-        users_id = "INTEGER PRIMARY KEY AUTOINCREMENT"
         row_id = "INTEGER PRIMARY KEY AUTOINCREMENT"
         bool_type = "INTEGER NOT NULL DEFAULT 0"
     else:
-        users_id = "SERIAL PRIMARY KEY"
         row_id = "SERIAL PRIMARY KEY"
         bool_type = "BOOLEAN NOT NULL DEFAULT FALSE"
 
     await db.execute(
         f"""
         CREATE TABLE IF NOT EXISTS auth_users (
-            id {users_id},
+            id TEXT PRIMARY KEY,
             username TEXT NOT NULL UNIQUE,
             email TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
+            is_admin {bool_type},
             created_at TEXT NOT NULL
         );
         """
@@ -47,7 +46,7 @@ async def init_auth_tables():
         CREATE TABLE IF NOT EXISTS auth_codes (
             id {row_id},
             code TEXT NOT NULL UNIQUE,
-            user_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             used {bool_type}
         );
@@ -58,12 +57,30 @@ async def init_auth_tables():
         CREATE TABLE IF NOT EXISTS auth_tokens (
             id {row_id},
             token TEXT NOT NULL UNIQUE,
-            user_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             revoked {bool_type}
         );
         """
     )
+    await _migrate_auth_tables()
+
+
+async def _migrate_auth_tables():
+    if _is_sqlite():
+        cols = await db.fetch_all("PRAGMA table_info(auth_users);")
+        col_names = {row["name"] for row in cols}
+        if "is_admin" not in col_names:
+            await db.execute("ALTER TABLE auth_users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0;")
+    else:
+        row = await db.fetch_one(
+            query=(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'auth_users' AND column_name = 'is_admin';"
+            )
+        )
+        if not row:
+            await db.execute("ALTER TABLE auth_users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE;")
 
 
 async def _purge_expired():
@@ -84,39 +101,37 @@ def _public_user(row) -> dict:
     }
 
 
+def _user_from_row(row) -> dict:
+    user = _public_user(row)
+    user["is_admin"] = bool(row["is_admin"])
+    return user
+
+
 async def create_user(username: str, email: str, password: str) -> dict:
     await _purge_expired()
+    user_id = generate_user_id()
     created_at = _iso(_utcnow())
     password_hash = hash_password(password)
+    is_admin = 0 if _is_sqlite() else False
     try:
-        if _is_sqlite():
-            await db.execute(
-                query=(
-                    "INSERT INTO auth_users (username, email, password_hash, created_at) "
-                    "VALUES (:username, :email, :password_hash, :created_at);"
-                ),
-                values={
-                    "username": username,
-                    "email": email,
-                    "password_hash": password_hash,
-                    "created_at": created_at,
-                },
-            )
-            row = await db.fetch_one("SELECT * FROM auth_users WHERE username = :username;", values={"username": username})
-        else:
-            row = await db.fetch_one(
-                query=(
-                    "INSERT INTO auth_users (username, email, password_hash, created_at) "
-                    "VALUES (:username, :email, :password_hash, :created_at) "
-                    "RETURNING *;"
-                ),
-                values={
-                    "username": username,
-                    "email": email,
-                    "password_hash": password_hash,
-                    "created_at": created_at,
-                },
-            )
+        await db.execute(
+            query=(
+                "INSERT INTO auth_users (id, username, email, password_hash, is_admin, created_at) "
+                "VALUES (:id, :username, :email, :password_hash, :is_admin, :created_at);"
+            ),
+            values={
+                "id": user_id,
+                "username": username,
+                "email": email,
+                "password_hash": password_hash,
+                "is_admin": is_admin,
+                "created_at": created_at,
+            },
+        )
+        row = await db.fetch_one(
+            query="SELECT * FROM auth_users WHERE id = :id;",
+            values={"id": user_id},
+        )
     except Exception as exc:
         message = str(exc).lower()
         if "unique" in message or "duplicate" in message:
@@ -137,14 +152,14 @@ async def get_user_by_login(login: str):
     )
 
 
-async def get_user_by_id(user_id: int):
+async def get_user_by_id(user_id: str):
     return await db.fetch_one(
         query="SELECT * FROM auth_users WHERE id = :user_id;",
         values={"user_id": user_id},
     )
 
 
-async def issue_login_code(user_id: int) -> dict:
+async def issue_login_code(user_id: str) -> dict:
     await _purge_expired()
     code = generate_code()
     expires_at = _iso(_utcnow() + timedelta(seconds=CODE_TTL_SECONDS))
@@ -215,7 +230,7 @@ async def resolve_token(token: str) -> dict:
     user = await get_user_by_id(row["user_id"])
     if not user:
         raise ValueError("User no longer exists.")
-    return _public_user(user)
+    return _user_from_row(user)
 
 
 async def revoke_token(token: str):

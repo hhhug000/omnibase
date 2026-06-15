@@ -1,5 +1,7 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from src.auth.dependencies import require_admin, require_user
 from src.schema import (
+    OWNER_COLUMN,
     dynamic_provision_table,
     validate_identifier,
     build_where_clause,
@@ -8,6 +10,9 @@ from src.schema import (
     drop_table,
     add_column,
     count_rows,
+    strip_hidden_fields,
+    table_has_owner_column,
+    validate_data_column,
 )
 from src.database import db
 
@@ -19,9 +24,9 @@ async def health_check():
     return {"status": "online", "engine": "Omnibase", "db_dialect": db.url.scheme}
 
 
-# --- TABLE MANAGEMENT ---
+# --- TABLE MANAGEMENT (admin only) ---
 @router.get("/tables")
-async def get_tables():
+async def get_tables(_admin: dict = Depends(require_admin)):
     try:
         tables = await list_tables()
         return {"tables": tables}
@@ -30,7 +35,7 @@ async def get_tables():
 
 
 @router.get("/tables/{table_name}/schema")
-async def get_table_schema(table_name: str):
+async def get_table_schema(table_name: str, _admin: dict = Depends(require_admin)):
     try:
         columns = await describe_table(table_name)
         if not columns:
@@ -45,9 +50,9 @@ async def get_table_schema(table_name: str):
 
 
 @router.delete("/tables/{table_name}")
-async def delete_table(table_name: str):
+async def delete_table(table_name: str, _admin: dict = Depends(require_admin)):
     try:
-        existing = await describe_table(table_name)
+        existing = await describe_table(table_name, include_hidden=True)
         if not existing:
             raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found.")
         await drop_table(table_name)
@@ -61,7 +66,7 @@ async def delete_table(table_name: str):
 
 
 @router.post("/tables/{table_name}/columns", status_code=201)
-async def add_table_column(table_name: str, payload: dict):
+async def add_table_column(table_name: str, payload: dict, _admin: dict = Depends(require_admin)):
     name = payload.get("name")
     col_type = payload.get("type")
     if not name or not col_type:
@@ -75,9 +80,8 @@ async def add_table_column(table_name: str, payload: dict):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# --- 1. SCHEMA GENERATOR (Table Provisioning) ---
 @router.post("/tables/create", status_code=201)
-async def ui_create_table(payload: dict):
+async def ui_create_table(payload: dict, _admin: dict = Depends(require_admin)):
     table_name = payload.get("table_name")
     columns = payload.get("columns")
     
@@ -92,15 +96,21 @@ async def ui_create_table(payload: dict):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# --- 2. CRUD: INSERT (Create) ---
+# --- CRUD: INSERT (Create) ---
 @router.post("/db/create/{table_name}", status_code=201)
-async def db_insert(table_name: str, payload: dict):
+async def db_insert(table_name: str, payload: dict, user: dict = Depends(require_user)):
     if not payload:
         raise HTTPException(status_code=400, detail="No data provided")
         
     try:
         safe_table = validate_identifier(table_name)
-        columns = [validate_identifier(k) for k in payload.keys()]
+        payload = dict(payload)
+        payload.pop(OWNER_COLUMN, None)
+
+        if await table_has_owner_column(table_name):
+            payload[OWNER_COLUMN] = user["id"]
+
+        columns = [validate_data_column(k) for k in payload.keys()]
         placeholders = [f":{col}" for col in columns]
         
         query = f"INSERT INTO {safe_table} ({', '.join(columns)}) VALUES ({', '.join(placeholders)});"
@@ -126,26 +136,25 @@ async def db_count(table_name: str, request: Request):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# --- 3. CRUD: READ (Select) ---
+# --- CRUD: READ (Select) ---
 @router.get("/db/read/{table_name}")
 async def db_select(table_name: str, request: Request):
     try:
         safe_table = validate_identifier(table_name)
         
-        # Uses .multi_items() to retain complex target parameters without overwrite drops
         query_params = request.query_params.multi_items()
         where_clause, params = build_where_clause(query_params)
         
         query = f"SELECT * FROM {safe_table} {where_clause};"
         records = await db.fetch_all(query=query, values=params)
-        return [dict(row) for row in records]
+        return [strip_hidden_fields(dict(row)) for row in records]
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# --- 4. CRUD: UPDATE (Modify) ---
+# --- CRUD: UPDATE (Modify) ---
 @router.put("/db/update/{table_name}")
 async def db_update(table_name: str, request: Request, payload: dict):
     if not payload: 
@@ -153,6 +162,9 @@ async def db_update(table_name: str, request: Request, payload: dict):
         
     try:
         safe_table = validate_identifier(table_name)
+        payload = dict(payload)
+        if OWNER_COLUMN in payload:
+            raise HTTPException(status_code=400, detail=f"Cannot modify reserved column '{OWNER_COLUMN}'.")
         
         query_params = request.query_params.multi_items()
         where_clause, where_params = build_where_clause(query_params)
@@ -179,7 +191,7 @@ async def db_update(table_name: str, request: Request, payload: dict):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# --- 5. CRUD: DELETE (Destroy) ---
+# --- CRUD: DELETE (Destroy) ---
 @router.delete("/db/delete/{table_name}")
 async def db_delete(table_name: str, request: Request):
     try:
