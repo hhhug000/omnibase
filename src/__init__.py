@@ -10,7 +10,9 @@ load_dotenv()
 async def lifespan(app: FastAPI):
     await db.connect()
     from src.auth import init_auth_tables
+    from src.access import init_access_tables
     await init_auth_tables()
+    await init_access_tables()
     print(f"Omnibase connected to {db.url.scheme}")
     yield
     await db.disconnect()

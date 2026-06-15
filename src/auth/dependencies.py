@@ -21,3 +21,17 @@ async def require_admin(user: dict = Depends(require_user)) -> dict:
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin access required.")
     return user
+
+
+async def optional_user(authorization: str | None = Header(default=None)) -> dict | None:
+    if not authorization:
+        return None
+
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+
+    try:
+        return await store.resolve_token(token)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc

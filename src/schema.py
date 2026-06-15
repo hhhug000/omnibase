@@ -3,6 +3,13 @@ from src.database import db
 
 OWNER_COLUMN = "_owner"
 HIDDEN_COLUMNS = frozenset({OWNER_COLUMN})
+SYSTEM_TABLES = frozenset({
+    "auth_users",
+    "auth_codes",
+    "auth_tokens",
+    "table_access_policies",
+    "sqlite_sequence",
+})
 
 def validate_identifier(name: str) -> str:
     """
@@ -56,11 +63,11 @@ async def list_tables() -> list[str]:
         rows = await db.fetch_all(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%%' ORDER BY name;"
         )
-        return [row["name"] for row in rows]
+        return [row["name"] for row in rows if row["name"] not in SYSTEM_TABLES]
     rows = await db.fetch_all(
         "SELECT tablename AS name FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY tablename;"
     )
-    return [row["name"] for row in rows]
+    return [row["name"] for row in rows if row["name"] not in SYSTEM_TABLES]
 
 async def describe_table(table_name: str, *, include_hidden: bool = False) -> list[dict]:
     safe_table = validate_identifier(table_name)
