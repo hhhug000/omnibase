@@ -107,6 +107,39 @@ def _user_from_row(row) -> dict:
     return user
 
 
+async def create_admin_user(username: str, email: str, password: str) -> dict:
+    await _purge_expired()
+    user_id = generate_user_id()
+    created_at = _iso(_utcnow())
+    password_hash = hash_password(password)
+    is_admin = 1 if _is_sqlite() else True
+    try:
+        await db.execute(
+            query=(
+                "INSERT INTO auth_users (id, username, email, password_hash, is_admin, created_at) "
+                "VALUES (:id, :username, :email, :password_hash, :is_admin, :created_at);"
+            ),
+            values={
+                "id": user_id,
+                "username": username,
+                "email": email,
+                "password_hash": password_hash,
+                "is_admin": is_admin,
+                "created_at": created_at,
+            },
+        )
+        row = await db.fetch_one(
+            query="SELECT * FROM auth_users WHERE id = :id;",
+            values={"id": user_id},
+        )
+    except Exception as exc:
+        message = str(exc).lower()
+        if "unique" in message or "duplicate" in message:
+            raise ValueError("Username or email is already registered.") from exc
+        raise
+    return _user_from_row(row)
+
+
 async def create_user(username: str, email: str, password: str) -> dict:
     await _purge_expired()
     user_id = generate_user_id()
