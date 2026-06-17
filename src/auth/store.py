@@ -1,7 +1,15 @@
 from datetime import datetime, timedelta, timezone
 
 from src.auth.config import CODE_TTL_SECONDS, TOKEN_TTL_SECONDS
-from src.auth.crypto import generate_code, generate_token, generate_user_id, hash_password
+from src.auth.crypto import (
+    generate_code,
+    generate_token,
+    generate_totp_secret,
+    generate_user_id,
+    hash_password,
+    totp_provisioning_uri,
+    verify_totp,
+)
 from src.database import db
 
 
@@ -37,6 +45,8 @@ async def init_auth_tables():
             email TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
             is_admin {bool_type},
+            totp_secret TEXT,
+            totp_enabled {bool_type},
             created_at TEXT NOT NULL
         );
         """
@@ -72,6 +82,10 @@ async def _migrate_auth_tables():
         col_names = {row["name"] for row in cols}
         if "is_admin" not in col_names:
             await db.execute("ALTER TABLE auth_users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0;")
+        if "totp_secret" not in col_names:
+            await db.execute("ALTER TABLE auth_users ADD COLUMN totp_secret TEXT;")
+        if "totp_enabled" not in col_names:
+            await db.execute("ALTER TABLE auth_users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0;")
     else:
         row = await db.fetch_one(
             query=(
@@ -81,6 +95,22 @@ async def _migrate_auth_tables():
         )
         if not row:
             await db.execute("ALTER TABLE auth_users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE;")
+        row = await db.fetch_one(
+            query=(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'auth_users' AND column_name = 'totp_secret';"
+            )
+        )
+        if not row:
+            await db.execute("ALTER TABLE auth_users ADD COLUMN totp_secret TEXT;")
+        row = await db.fetch_one(
+            query=(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'auth_users' AND column_name = 'totp_enabled';"
+            )
+        )
+        if not row:
+            await db.execute("ALTER TABLE auth_users ADD COLUMN totp_enabled BOOLEAN NOT NULL DEFAULT FALSE;")
 
 
 async def _purge_expired():
@@ -97,6 +127,7 @@ def _public_user(row) -> dict:
         "id": row["id"],
         "username": row["username"],
         "email": row["email"],
+        "totp_enabled": bool(row["totp_enabled"]) if row["totp_enabled"] is not None else False,
         "created_at": row["created_at"],
     }
 
@@ -219,6 +250,10 @@ async def exchange_code_for_token(code: str) -> dict:
     if _parse_iso(row["expires_at"]) <= _utcnow():
         raise ValueError("Code has expired.")
 
+    user = await get_user_by_id(row["user_id"])
+    if not user:
+        raise ValueError("User no longer exists.")
+
     if _is_sqlite():
         await db.execute("UPDATE auth_codes SET used = 1 WHERE id = :id;", values={"id": row["id"]})
     else:
@@ -238,13 +273,61 @@ async def exchange_code_for_token(code: str) -> dict:
             "revoked": 0 if _is_sqlite() else False,
         },
     )
-    user = await get_user_by_id(row["user_id"])
     return {
         "token": token,
         "expires_in": TOKEN_TTL_SECONDS,
         "expires_at": expires_at,
         "user": _public_user(user),
     }
+
+
+async def setup_totp(user_id: str) -> dict:
+    user = await get_user_by_id(user_id)
+    if not user:
+        raise ValueError("User not found.")
+    if bool(user["totp_enabled"]) if user["totp_enabled"] is not None else False:
+        raise ValueError("TOTP is already enabled. Disable it first before setting up a new one.")
+    secret = generate_totp_secret()
+    uri = totp_provisioning_uri(secret, user["username"])
+    await db.execute(
+        "UPDATE auth_users SET totp_secret = :secret WHERE id = :id;",
+        values={"secret": secret, "id": user_id},
+    )
+    return {"secret": secret, "uri": uri}
+
+
+async def confirm_totp(user_id: str, code: str) -> dict:
+    user = await get_user_by_id(user_id)
+    if not user:
+        raise ValueError("User not found.")
+    if bool(user["totp_enabled"]) if user["totp_enabled"] is not None else False:
+        raise ValueError("TOTP is already enabled.")
+    if not user["totp_secret"]:
+        raise ValueError("No TOTP setup in progress. Call /totp/setup first.")
+    if not verify_totp(user["totp_secret"], code):
+        raise ValueError("Invalid TOTP code.")
+    enabled_val = 1 if _is_sqlite() else True
+    await db.execute(
+        "UPDATE auth_users SET totp_enabled = :val WHERE id = :id;",
+        values={"val": enabled_val, "id": user_id},
+    )
+    return {"totp_enabled": True}
+
+
+async def disable_totp(user_id: str, code: str) -> dict:
+    user = await get_user_by_id(user_id)
+    if not user:
+        raise ValueError("User not found.")
+    if not (bool(user["totp_enabled"]) if user["totp_enabled"] is not None else False):
+        raise ValueError("TOTP is not enabled.")
+    if not verify_totp(user["totp_secret"], code):
+        raise ValueError("Invalid TOTP code.")
+    disabled_val = 0 if _is_sqlite() else False
+    await db.execute(
+        "UPDATE auth_users SET totp_secret = NULL, totp_enabled = :val WHERE id = :id;",
+        values={"val": disabled_val, "id": user_id},
+    )
+    return {"totp_enabled": False}
 
 
 async def resolve_token(token: str) -> dict:

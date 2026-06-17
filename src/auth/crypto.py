@@ -2,6 +2,7 @@ import re
 import secrets
 import uuid
 from argon2 import PasswordHasher
+import pyotp
 
 _USERNAME_RE = re.compile(r"^[a-zA-Z0-9_]{3,32}$")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -58,3 +59,18 @@ def generate_token() -> str:
 
 def generate_user_id() -> str:
     return str(uuid.uuid4())
+
+
+def generate_totp_secret() -> str:
+    return pyotp.random_base32()
+
+
+def totp_provisioning_uri(secret: str, username: str) -> str:
+    return pyotp.TOTP(secret).provisioning_uri(name=username, issuer_name="Omnibase")
+
+
+def verify_totp(secret: str, code: str) -> bool:
+    try:
+        return pyotp.TOTP(secret).verify(code, valid_window=1)
+    except Exception:
+        return False

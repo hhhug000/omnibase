@@ -33,6 +33,13 @@ async def login(payload: dict):
         user = await store.get_user_by_login(login_id)
         if not user or not crypto.verify_password(password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid login or password.")
+        totp_enabled = bool(user["totp_enabled"]) if user["totp_enabled"] is not None else False
+        if totp_enabled:
+            totp_code = payload.get("totp")
+            if not totp_code:
+                raise HTTPException(status_code=401, detail="TOTP code is required.")
+            if not crypto.verify_totp(user["totp_secret"], totp_code):
+                raise HTTPException(status_code=401, detail="Invalid TOTP code.")
         code_payload = await store.issue_login_code(user["id"])
         return {"status": "success", **code_payload}
     except HTTPException:
@@ -60,9 +67,43 @@ async def me(user: dict = Depends(require_user)):
             "id": user["id"],
             "username": user["username"],
             "email": user["email"],
+            "totp_enabled": user.get("totp_enabled", False),
             "created_at": user["created_at"],
         }
     }
+
+
+@router.post("/totp/setup", status_code=200)
+async def totp_setup(user: dict = Depends(require_user)):
+    try:
+        result = await store.setup_totp(user["id"])
+        return {"status": "success", **result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/totp/confirm", status_code=200)
+async def totp_confirm(payload: dict, user: dict = Depends(require_user)):
+    code = payload.get("code")
+    if not code:
+        raise HTTPException(status_code=400, detail="code is required.")
+    try:
+        result = await store.confirm_totp(user["id"], code)
+        return {"status": "success", **result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/totp", status_code=200)
+async def totp_disable(payload: dict, user: dict = Depends(require_user)):
+    code = payload.get("code")
+    if not code:
+        raise HTTPException(status_code=400, detail="code is required.")
+    try:
+        result = await store.disable_totp(user["id"], code)
+        return {"status": "success", **result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/logout")
