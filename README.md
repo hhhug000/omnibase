@@ -1,2 +1,2 @@
 # omnibase
-All the tools you need to make your apps quickly
+An all in one database and backend solution to help you build apps in minutes, not weeks
