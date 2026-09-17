@@ -1,8 +1,11 @@
 import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from src.database import db
+
+ADMIN_UI_DIR = os.path.join(os.path.dirname(__file__), "admin_ui")
 
 load_dotenv()
 
@@ -25,5 +28,7 @@ def create_app():
     from src.auth import router as auth_router
     app.include_router(router)
     app.include_router(auth_router)
+
+    app.mount("/", StaticFiles(directory=ADMIN_UI_DIR, html=True), name="admin_ui")
 
     return app
